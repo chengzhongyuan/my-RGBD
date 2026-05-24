@@ -70,8 +70,8 @@ private:
     std::vector<double> mvTimestamps;
     float mDepthMapFactor;
 
-    /** Find the closest timestamp index */
-    int findClosestIndex(double timestamp) const;
+    /** Find the closest timestamp (returns the actual timestamp key) */
+    double findClosestTimestamp(double timestamp) const;
 };
 
 } // namespace ORB_SLAM2

@@ -50,16 +50,16 @@ DynamicMask::DynamicMask(const std::string &maskDir,
               << maskDir << std::endl;
 }
 
-int DynamicMask::findClosestIndex(double timestamp) const
+double DynamicMask::findClosestTimestamp(double timestamp) const
 {
     if (mMasks.empty())
-        return -1;
+        return -1.0;
 
     // Find closest timestamp
     auto it = mMasks.lower_bound(timestamp);
 
     if (it == mMasks.end())
-        return std::prev(it)->first;  // Return index of last element
+        return std::prev(it)->first;
     if (it == mMasks.begin())
         return it->first;
 
@@ -87,7 +87,7 @@ cv::Mat DynamicMask::getMask(double timestamp) const
     if (mMasks.empty())
         return cv::Mat();
 
-    double bestTS = findClosestIndex(timestamp);
+    double bestTS = findClosestTimestamp(timestamp);
     auto it = mMasks.find(bestTS);
     if (it != mMasks.end())
         return it->second;
