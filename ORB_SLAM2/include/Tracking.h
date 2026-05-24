@@ -220,9 +220,10 @@ public:
     // ---- Dynamic SLAM (Wang Zhen 2025) ----
     // Public interface for System to set up dynamic mask
     void SetDynamicMask(DynamicMask* pMask) { mpDynamicMask = pMask; mbUseDynamicMask = (pMask != NULL); }
+    DynamicMask* GetDynamicMask() { return mpDynamicMask; }
+    cv::Mat GetK() { return mK; }
 
 protected:
-    // ---- Dynamic SLAM additions (Wang Zhen 2025) ----
     // Dynamic mask (semantic segmentation) for filtering dynamic feature points
     DynamicMask* mpDynamicMask;
     bool mbUseDynamicMask;

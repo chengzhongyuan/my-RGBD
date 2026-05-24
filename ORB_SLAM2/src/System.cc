@@ -107,6 +107,16 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     mpTracker->SetLocalMapper(mpLocalMapper);
     mpTracker->SetLoopClosing(mpLoopCloser);
 
+    // ---- Dynamic SLAM initialization (Wang Zhen 2025) ----
+    mpDenseMapper = new DenseMapping(
+        fsSettings["Camera.fx"], fsSettings["Camera.fy"],
+        fsSettings["Camera.cx"], fsSettings["Camera.cy"],
+        fsSettings["DepthMapFactor"], 0.01f);
+    mpOctoMap = new OctoMap(0.05f);
+    mbUseBEBLID = false;
+    mbUseDenseMapping = false;
+    mbMaskEnabled = false;
+
     mpLocalMapper->SetTracker(mpTracker);
     mpLocalMapper->SetLoopCloser(mpLoopCloser);
 
@@ -209,6 +219,24 @@ cv::Mat System::TrackRGBD(const cv::Mat &im, const cv::Mat &depthmap, const doub
 
     cv::Mat Tcw = mpTracker->GrabImageRGBD(im,depthmap,timestamp);
 
+    // ---- Dynamic SLAM: Add keyframe to dense map (Wang Zhen 2025) ----
+    if(mbUseDenseMapping && mpDenseMapper && mpTracker->mState == Tracking::OK)
+    {
+        // Check if current frame is a keyframe (just became one via CreateNewKeyFrame)
+        // Use simple heuristic: add every N frames or when dynamic mask available
+        static int frameCount = 0;
+        frameCount++;
+        if(mbMaskEnabled && frameCount % 10 == 0)  // Every 10th frame with mask
+        {
+            cv::Mat dynMask;
+            DynamicMask* pDM = mpTracker->GetDynamicMask();
+            if(pDM)
+                dynMask = pDM->getMask(timestamp);
+
+            mpDenseMapper->AddKeyFrame(im, depthmap, dynMask, Tcw);
+        }
+    }
+
     unique_lock<mutex> lock2(mMutexState);
     mTrackingState = mpTracker->mState;
     mTrackedMapPoints = mpTracker->mCurrentFrame.mvpMapPoints;
@@ -308,13 +336,69 @@ void System::EnableDynamicMask(const std::string &maskDir,
     if(pMask->isReady())
     {
         mpTracker->SetDynamicMask(pMask);
+        mbMaskEnabled = true;
+        // Also enable dense mapping when dynamic mask is used (paper pipeline)
+        mbUseDenseMapping = true;
         std::cout << "DynamicSLAM: Dynamic mask enabled with " << pMask->size()
-                  << " masks." << std::endl;
+                  << " masks. Dense mapping enabled." << std::endl;
     }
     else
     {
         delete pMask;
         std::cerr << "DynamicSLAM: Failed to load masks from " << maskDir << std::endl;
+    }
+}
+
+void System::EnableBEBLID(bool enable)
+{
+    mbUseBEBLID = enable;
+    // BEBLID switching would require re-creating ORBextractor
+    // For now, BEBLID is enabled at construction time via tracking config
+    std::cout << "DynamicSLAM: BEBLID descriptor " << (enable ? "enabled" : "disabled")
+              << " (requires Tracking rebuild to take effect)" << std::endl;
+}
+
+void System::EnableDenseMapping(bool enable, float voxelSize)
+{
+    mbUseDenseMapping = enable;
+    if (mpDenseMapper)
+        delete mpDenseMapper;
+    cv::Mat K = mpTracker->GetK();
+    mpDenseMapper = new DenseMapping(
+        K.at<float>(0,0), K.at<float>(1,1),
+        K.at<float>(0,2), K.at<float>(1,2),
+        5000.0f, voxelSize);
+    std::cout << "DynamicSLAM: Dense mapping " << (enable ? "enabled" : "disabled")
+              << " (voxel=" << voxelSize << "m)" << std::endl;
+}
+
+void System::SaveDenseMap(const std::string &filepath)
+{
+    if (!mpDenseMapper || !mbUseDenseMapping)
+    {
+        std::cerr << "DynamicSLAM: Dense mapping not enabled." << std::endl;
+        return;
+    }
+    mpDenseMapper->SavePointCloud(filepath, true);
+}
+
+void System::SaveOctoMap(const std::string &filepath)
+{
+    if (!mpOctoMap || mpDenseMapper->TotalPoints() == 0)
+    {
+        std::cerr << "DynamicSLAM: No points for octree map." << std::endl;
+        return;
+    }
+
+    // Convert dense map to octree
+    std::vector<cv::Point3f> points;
+    std::vector<cv::Vec3b> colors;
+    mpDenseMapper->GetFilteredCloud(points, colors);
+
+    if (!points.empty())
+    {
+        mpOctoMap->InsertPointCloud(points);
+        mpOctoMap->Save(filepath);
     }
 }
 

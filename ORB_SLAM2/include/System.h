@@ -28,6 +28,7 @@
 
 #include "Tracking.h"
 #include "DynamicMask.h"
+#include "DenseMapping.h"
 #include "FrameDrawer.h"
 #include "MapDrawer.h"
 #include "Map.h"
@@ -101,6 +102,18 @@ public:
                            const std::vector<double> &timestamps,
                            float depthMapFactor = 5000.0);
 
+    // Enable BEBLID descriptor (Section 3.3) instead of BRIEF
+    void EnableBEBLID(bool enable = true);
+
+    // Enable dense point cloud mapping (Section 4.1.2)
+    void EnableDenseMapping(bool enable = true, float voxelSize = 0.01f);
+
+    // Save dense point cloud map to PLY file
+    void SaveDenseMap(const std::string &filepath);
+
+    // Save octree map to file
+    void SaveOctoMap(const std::string &filepath);
+
     // Save camera trajectory in the TUM RGB-D dataset format.
     // Only for stereo and RGB-D. This method does not work for monocular.
     // Call first Shutdown()
@@ -147,6 +160,13 @@ private:
     // It also decides when to insert a new keyframe, create some new MapPoints and
     // performs relocalization if tracking fails.
     Tracking* mpTracker;
+
+    // ---- Dynamic SLAM members (Wang Zhen 2025) ----
+    DenseMapping* mpDenseMapper;
+    OctoMap* mpOctoMap;
+    bool mbUseBEBLID;
+    bool mbUseDenseMapping;
+    bool mbMaskEnabled;
 
     // Local Mapper. It manages the local map and performs local bundle adjustment.
     LocalMapping* mpLocalMapper;

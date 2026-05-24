@@ -73,6 +73,8 @@ src/Sim3Solver.cc
 src/Initializer.cc
 src/Viewer.cc
 src/DynamicMask.cc
+src/BEBLIDextractor.cc
+src/DenseMapping.cc
 )
 
 target_link_libraries(${PROJECT_NAME}
