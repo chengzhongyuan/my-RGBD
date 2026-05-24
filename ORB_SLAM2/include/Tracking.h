@@ -37,6 +37,7 @@
 #include "Initializer.h"
 #include "MapDrawer.h"
 #include "System.h"
+#include "DynamicMask.h"
 
 #include <mutex>
 
@@ -214,6 +215,31 @@ protected:
     bool mbRGB;
 
     list<MapPoint*> mlpTemporalPoints;
+
+public:
+    // ---- Dynamic SLAM (Wang Zhen 2025) ----
+    // Public interface for System to set up dynamic mask
+    void SetDynamicMask(DynamicMask* pMask) { mpDynamicMask = pMask; mbUseDynamicMask = (pMask != NULL); }
+
+protected:
+    // ---- Dynamic SLAM additions (Wang Zhen 2025) ----
+    // Dynamic mask (semantic segmentation) for filtering dynamic feature points
+    DynamicMask* mpDynamicMask;
+    bool mbUseDynamicMask;
+
+    // Previous frame for optical flow computation (Section 3.2)
+    cv::Mat mPrevGray;
+
+    // Filter dynamic keypoints from current frame using semantic mask + optical flow
+    void FilterDynamicKeypoints(cv::Mat &imDepth);
+    // Refine semantic mask with depth (Section 3.1.3)
+    cv::Mat RefineMaskWithDepth(const cv::Mat &mask, const cv::Mat &depth);
+    // Optical flow dynamic detection (Section 3.2)
+    cv::Mat DetectDynamicByOpticalFlow(const cv::Mat &prevGray, const cv::Mat &currGray);
+
+    // Rotation-aware keyframe selection (Section 4.1.1)
+    float ComputeRelativeMotion(const cv::Mat &T_ref_to_cur);
+    cv::Mat mRefKFPose;  // Reference keyframe pose for rotation calculation
 };
 
 } //namespace ORB_SLAM

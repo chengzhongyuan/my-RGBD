@@ -27,6 +27,7 @@
 #include<opencv2/core/core.hpp>
 
 #include "Tracking.h"
+#include "DynamicMask.h"
 #include "FrameDrawer.h"
 #include "MapDrawer.h"
 #include "Map.h"
@@ -93,6 +94,12 @@ public:
     // It waits until all threads have finished.
     // This function must be called before saving the trajectory.
     void Shutdown();
+
+    // ---- Dynamic SLAM (Wang Zhen 2025) ----
+    // Enable dynamic feature point filtering using pre-computed semantic masks
+    void EnableDynamicMask(const std::string &maskDir,
+                           const std::vector<double> &timestamps,
+                           float depthMapFactor = 5000.0);
 
     // Save camera trajectory in the TUM RGB-D dataset format.
     // Only for stereo and RGB-D. This method does not work for monocular.

@@ -125,6 +125,11 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
     if(sensor==System::MONOCULAR)
         mpIniORBextractor = new ORBextractor(2*nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
 
+    // ---- Dynamic SLAM initialization (Wang Zhen 2025) ----
+    mpDynamicMask = NULL;
+    mbUseDynamicMask = false;
+    mRefKFPose = cv::Mat::eye(4,4,CV_32F);
+
     cout << endl  << "ORB Extractor Parameters: " << endl;
     cout << "- Number of Features: " << nFeatures << endl;
     cout << "- Scale Levels: " << nLevels << endl;
@@ -229,6 +234,12 @@ cv::Mat Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, const d
         imDepth.convertTo(imDepth,CV_32F,mDepthMapFactor);
 
     mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth);
+
+    // ---- Dynamic SLAM: filter dynamic keypoints (Wang Zhen 2025) ----
+    if(mbUseDynamicMask && mpDynamicMask != NULL)
+    {
+        FilterDynamicKeypoints(imDepth);
+    }
 
     Track();
 
@@ -1035,7 +1046,21 @@ bool Tracking::NeedNewKeyFrame()
     // Condition 2: Few tracked points compared to reference keyframe. Lots of visual odometry compared to map matches.
     const bool c2 = ((mnMatchesInliers<nRefMatches*thRefRatio|| bNeedToInsertClose) && mnMatchesInliers>15);
 
-    if((c1a||c1b||c1c)&&c2)
+    // ---- Dynamic SLAM: Rotation-aware condition (paper Section 4.1.1) ----
+    // Condition 3: Camera rotation > 30 degrees (P > 0.4), create keyframe
+    bool c3 = false;
+    if(!mRefKFPose.empty() && !mCurrentFrame.mTcw.empty())
+    {
+        // Compute relative transform from reference KF to current frame
+        cv::Mat T_ref_to_cur = mRefKFPose.inv() * mCurrentFrame.mTcw;
+        float P = ComputeRelativeMotion(T_ref_to_cur);
+
+        // P > 0.4 corresponds to approximately 30 degrees rotation
+        if(P > 0.4f)
+            c3 = true;
+    }
+
+    if((c1a||c1b||c1c||c3)&&c2)
     {
         // If the mapping accepts keyframes, insert keyframe.
         // Otherwise send a signal to interrupt BA
@@ -1070,6 +1095,10 @@ void Tracking::CreateNewKeyFrame()
 
     mpReferenceKF = pKF;
     mCurrentFrame.mpReferenceKF = pKF;
+
+    // ---- Dynamic SLAM: Save reference KF pose for rotation calculation ----
+    if(!mCurrentFrame.mTcw.empty())
+        mRefKFPose = mCurrentFrame.mTcw.clone();
 
     if(mSensor!=System::MONOCULAR)
     {
@@ -1588,6 +1617,242 @@ void Tracking::InformOnlyTracking(const bool &flag)
     mbOnlyTracking = flag;
 }
 
+// ============================================================
+// Dynamic SLAM Functions (Wang Zhen 2025)
+// Paper: "基于RGB-D相机的动态场景视觉SLAM方法研究"
+// ============================================================
+
+cv::Mat Tracking::RefineMaskWithDepth(const cv::Mat &mask, const cv::Mat &depth)
+{
+    // Paper Section 3.1.3, Equation (3.4)
+    // tau_1 = 500 corresponds to ~0.1m at depth scale 5000
+    return DynamicMask::refineWithDepth(mask, depth, 500.0, 3);
+}
+
+cv::Mat Tracking::DetectDynamicByOpticalFlow(const cv::Mat &prevGray, const cv::Mat &currGray)
+{
+    // Paper Section 3.2.2
+    // Compute sparse optical flow to detect moving pixels
+    // Uses LK optical flow with homography compensation for camera ego-motion
+
+    if(prevGray.empty() || currGray.empty())
+        return cv::Mat();
+
+    // Detect ORB features for homography estimation
+    vector<cv::Point2f> prevPts, currPts;
+    vector<cv::KeyPoint> kp1, kp2;
+    cv::Mat desc1, desc2;
+
+    cv::Ptr<cv::ORB> orb = cv::ORB::create(500);
+    orb->detectAndCompute(prevGray, cv::Mat(), kp1, desc1);
+    orb->detectAndCompute(currGray, cv::Mat(), kp2, desc2);
+
+    if(kp1.size() < 4 || kp2.size() < 4)
+        return cv::Mat();
+
+    // Match features
+    cv::BFMatcher bf(cv::NORM_HAMMING, true);
+    vector<cv::DMatch> matches;
+    bf.match(desc1, desc2, matches);
+
+    if(matches.size() < 4)
+        return cv::Mat();
+
+    // Get matched point coordinates
+    prevPts.reserve(matches.size());
+    currPts.reserve(matches.size());
+    for(size_t i = 0; i < matches.size(); i++)
+    {
+        prevPts.push_back(kp1[matches[i].queryIdx].pt);
+        currPts.push_back(kp2[matches[i].trainIdx].pt);
+    }
+
+    // Compute homography H via RANSAC (paper Equation 3.12-3.16)
+    cv::Mat H = cv::findHomography(prevPts, currPts, cv::RANSAC, 3.0);
+    if(H.empty())
+        H = cv::Mat::eye(3, 3, CV_64F);
+
+    // Warp current frame to compensate camera motion (paper Figure 3.7)
+    cv::Mat currWarped;
+    cv::warpPerspective(currGray, currWarped, H.inv(), currGray.size());
+
+    // Downsample for speed (paper: downsample then upsample)
+    cv::Mat prevSmall, currSmall;
+    cv::resize(prevGray, prevSmall, cv::Size(), 0.5, 0.5);
+    cv::resize(currWarped, currSmall, cv::Size(), 0.5, 0.5);
+
+    // Compute dense optical flow (Farneback)
+    cv::Mat flow;
+    cv::calcOpticalFlowFarneback(prevSmall, currSmall, flow,
+                                 0.5, 3, 15, 3, 5, 1.2, 0);
+
+    // Upsample flow to original size
+    cv::resize(flow, flow, prevGray.size(), 0, 0, cv::INTER_LINEAR);
+    flow *= 2.0;  // Compensate for downsampling
+
+    // Compute flow magnitude
+    cv::Mat flowMag;
+    vector<cv::Mat> flowChannels(2);
+    cv::split(flow, flowChannels);
+    cv::magnitude(flowChannels[0], flowChannels[1], flowMag);
+
+    // Binarize using threshold
+    cv::Mat dynamicMask;
+    cv::threshold(flowMag, dynamicMask, 1.0, 255, cv::THRESH_BINARY);
+    dynamicMask.convertTo(dynamicMask, CV_8U);
+
+    // Morphological operations for edge refinement
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
+    cv::morphologyEx(dynamicMask, dynamicMask, cv::MORPH_OPEN, kernel);
+    cv::morphologyEx(dynamicMask, dynamicMask, cv::MORPH_CLOSE, kernel);
+
+    return dynamicMask;
+}
+
+float Tracking::ComputeRelativeMotion(const cv::Mat &T_ref_to_cur)
+{
+    // Paper Section 4.1.1, Equation (4.2)-(4.5)
+    cv::Mat R = T_ref_to_cur(cv::Rect(0, 0, 3, 3));
+    cv::Mat t = T_ref_to_cur(cv::Rect(3, 0, 1, 3));
+
+    // Extract rotation angle using Rodrigues formula (Equation 4.3)
+    cv::Mat rvec;
+    cv::Rodrigues(R, rvec);
+    float theta = cv::norm(rvec);  // Rotation angle in radians
+
+    float t_norm = cv::norm(t);
+
+    // Compute adaptive weight alpha (Equation 4.5)
+    // alpha = 1 - 1/(1 + tan(|R|)^4)
+    float tan_r = tan(theta);
+    float alpha = 1.0f - 1.0f / (1.0f + tan_r * tan_r * tan_r * tan_r);
+
+    // Relative motion P (Equation 4.4)
+    float P = alpha * t_norm + (1.0f - alpha) * theta;
+
+    return P;
+}
+
+void Tracking::FilterDynamicKeypoints(cv::Mat &imDepth)
+{
+    // Paper Section 3.4, Figure 3.9: Fused dynamic detection module
+    // Step 1: Get semantic mask for current frame
+    cv::Mat semMask = mpDynamicMask->getMask(mCurrentFrame.mTimeStamp);
+
+    if(semMask.empty())
+        return;
+
+    // Step 2: Refine semantic mask with depth (Section 3.1.3)
+    if(!imDepth.empty())
+    {
+        semMask = RefineMaskWithDepth(semMask, imDepth);
+    }
+
+    // Step 3: Optical flow detection (Section 3.2) as secondary check
+    cv::Mat flowMask;
+    if(!mPrevGray.empty())
+    {
+        flowMask = DetectDynamicByOpticalFlow(mPrevGray, mImGray);
+    }
+
+    // Combine masks
+    cv::Mat combinedMask = semMask.clone();
+    if(!flowMask.empty())
+        combinedMask = cv::max(combinedMask, flowMask);
+
+    // Step 4: Filter out dynamic keypoints from current frame
+    vector<cv::KeyPoint> staticKeys;
+    cv::Mat staticDesc;
+    vector<int> staticIdx;
+
+    for(int i = 0; i < mCurrentFrame.N; i++)
+    {
+        const cv::KeyPoint &kp = mCurrentFrame.mvKeys[i];
+        int x = (int)kp.pt.x;
+        int y = (int)kp.pt.y;
+
+        if(x >= 0 && x < combinedMask.cols && y >= 0 && y < combinedMask.rows)
+        {
+            if(combinedMask.at<uchar>(y, x) < 128)  // Static pixel
+            {
+                staticKeys.push_back(kp);
+                staticIdx.push_back(i);
+            }
+        }
+        else
+        {
+            staticKeys.push_back(kp);
+            staticIdx.push_back(i);
+        }
+    }
+
+    // If too many keypoints removed, keep original (avoid tracking failure)
+    if(staticKeys.size() < 50)
+    {
+        std::cout << "  DynamicSLAM: Too few static keypoints ("
+                  << staticKeys.size() << "), keeping original." << std::endl;
+        mPrevGray = mImGray.clone();
+        return;
+    }
+
+    // Step 5: Build filtered descriptor matrix
+    if(!mCurrentFrame.mDescriptors.empty() && !staticIdx.empty())
+    {
+        staticDesc.create(staticKeys.size(), mCurrentFrame.mDescriptors.cols,
+                          mCurrentFrame.mDescriptors.type());
+        for(size_t i = 0; i < staticIdx.size(); i++)
+        {
+            mCurrentFrame.mDescriptors.row(staticIdx[i]).copyTo(staticDesc.row(i));
+        }
+    }
+
+    // Step 6: Update frame with filtered keypoints
+    int nRemoved = mCurrentFrame.N - staticKeys.size();
+    mCurrentFrame.mvKeys = staticKeys;
+    mCurrentFrame.mDescriptors = staticDesc;
+    mCurrentFrame.N = staticKeys.size();
+
+    // Re-run undistort on filtered keys
+    if(mCurrentFrame.mvKeysUn.size() == (size_t)(mCurrentFrame.N + nRemoved))
+    {
+        vector<cv::KeyPoint> newKeysUn;
+        for(size_t i = 0; i < staticIdx.size(); i++)
+            newKeysUn.push_back(mCurrentFrame.mvKeysUn[staticIdx[i]]);
+        mCurrentFrame.mvKeysUn = newKeysUn;
+    }
+
+    // Update map point associations
+    vector<MapPoint*> newMapPoints(staticKeys.size(), static_cast<MapPoint*>(NULL));
+    vector<bool> newOutliers(staticKeys.size(), false);
+    vector<float> newDepths(staticKeys.size(), -1.0f);
+
+    if(mCurrentFrame.mvpMapPoints.size() == (size_t)(mCurrentFrame.N + nRemoved))
+    {
+        for(size_t i = 0; i < staticIdx.size(); i++)
+        {
+            newMapPoints[i] = mCurrentFrame.mvpMapPoints[staticIdx[i]];
+            newOutliers[i] = mCurrentFrame.mvbOutlier[staticIdx[i]];
+            if(mCurrentFrame.mvDepth.size() > staticIdx[i])
+                newDepths[i] = mCurrentFrame.mvDepth[staticIdx[i]];
+        }
+    }
+
+    mCurrentFrame.mvpMapPoints = newMapPoints;
+    mCurrentFrame.mvbOutlier = newOutliers;
+    mCurrentFrame.mvDepth = newDepths;
+
+    // Re-assign features to grid
+    mCurrentFrame.AssignFeaturesToGrid();
+
+    if(nRemoved > 0)
+    {
+        std::cout << "  DynamicSLAM: Removed " << nRemoved
+                  << " dynamic keypoints, kept " << mCurrentFrame.N << std::endl;
+    }
+
+    // Save current frame for next optical flow
+    mPrevGray = mImGray.clone();
+}
 
 
 } //namespace ORB_SLAM

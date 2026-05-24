@@ -293,6 +293,31 @@ bool System::MapChanged()
         return false;
 }
 
+// ---- Dynamic SLAM (Wang Zhen 2025) ----
+void System::EnableDynamicMask(const std::string &maskDir,
+                               const std::vector<double> &timestamps,
+                               float depthMapFactor)
+{
+    if(mSensor != RGBD)
+    {
+        std::cerr << "DynamicSLAM: Dynamic mask only supported for RGBD sensor." << std::endl;
+        return;
+    }
+
+    DynamicMask* pMask = new DynamicMask(maskDir, timestamps, depthMapFactor);
+    if(pMask->isReady())
+    {
+        mpTracker->SetDynamicMask(pMask);
+        std::cout << "DynamicSLAM: Dynamic mask enabled with " << pMask->size()
+                  << " masks." << std::endl;
+    }
+    else
+    {
+        delete pMask;
+        std::cerr << "DynamicSLAM: Failed to load masks from " << maskDir << std::endl;
+    }
+}
+
 void System::Reset()
 {
     unique_lock<mutex> lock(mMutexReset);

@@ -36,9 +36,10 @@ void LoadImages(const string &strAssociationFilename, vector<string> &vstrImageF
 
 int main(int argc, char **argv)
 {
-    if(argc != 5)
+    if(argc != 5 && argc != 6)
     {
-        cerr << endl << "Usage: ./rgbd_tum path_to_vocabulary path_to_settings path_to_sequence path_to_association" << endl;
+        cerr << endl << "Usage: ./rgbd_tum path_to_vocabulary path_to_settings path_to_sequence path_to_association [path_to_masks]" << endl;
+        cerr << "  path_to_masks: optional directory with pre-computed semantic masks for dynamic SLAM" << endl;
         return 1;
     }
 
@@ -64,6 +65,14 @@ int main(int argc, char **argv)
 
     // Create SLAM system. It initializes all system threads and gets ready to process frames.
     ORB_SLAM2::System SLAM(argv[1],argv[2],ORB_SLAM2::System::RGBD,true);
+
+    // ---- Dynamic SLAM: Enable dynamic mask if provided (Wang Zhen 2025) ----
+    if(argc == 6)
+    {
+        string maskDir = string(argv[5]);
+        cout << "DynamicSLAM: Loading masks from " << maskDir << endl;
+        SLAM.EnableDynamicMask(maskDir, vTimestamps);
+    }
 
     // Vector for tracking time statistics
     vector<float> vTimesTrack;
